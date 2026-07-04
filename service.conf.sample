@@ -1,0 +1,30 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Mattia Cabrini
+#
+# A net-sftp-forwarder service configuration. Copy this to <name>.conf in the same
+# directory and edit it; every *.conf file here is an independent transfer job,
+# run once a minute. A '#' starts a comment to end of line.
+
+# Directory whose eligible files are forwarded (top level only).
+source: /var/spool/example/out
+
+# Where to send them: [user@]host:/absolute/remote/dir  (split on the first ':').
+# The user defaults to root. IPv6 literals go in brackets: user@[2001:db8::1]:/dir
+# The SSH client config (~/.ssh/config) is NOT read; use 'port:' below for a
+# non-standard port.
+dst: user@remote.example.org:/var/spool/example/in
+
+# Eligibility: a file is forwarded only if its owner user AND owner group match
+# these regular expressions (Go/RE2 syntax; anchored, full match). Leave a field
+# empty to impose no constraint on it.
+file-user:  ^(app|deploy)$
+file-group: ^staff$
+
+# SSH private key for this job. Keep it mode 0600; no passphrase (runs unattended).
+key: /usr/local/etc/net-sftp-forwarder/keys/example_ed25519
+
+# Optional: SSH port (default 22).
+# port: 22
+
+# Optional: override the global known_hosts for this job.
+# known-hosts: /usr/local/etc/net-sftp-forwarder/known_hosts
