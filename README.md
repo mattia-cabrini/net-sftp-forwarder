@@ -1,7 +1,8 @@
 # net-sftp-forwarder
 
-Copyright (c) 2026 Mattia Cabrini
-SPDX-License-Identifier: MIT
+> Copyright (c) 2026 Mattia Cabrini
+> 
+> SPDX-License-Identifier: MIT
 
 A small, generic file mover for GNU/Linux and BSD. It watches one or more source
 directories and forwards eligible files to remote hosts over SSH, once a minute,

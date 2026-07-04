@@ -9,6 +9,7 @@ GO = go
 all: build
 
 build:
+	@out=$$(gofmt -l .); if [ -n "$$out" ]; then echo "gofmt: files need formatting:"; echo "$$out"; exit 1; fi; echo "ok: gofmt"
 	mkdir -p build
 	$(GO) build -o build/net-sftp-forwarder-run ./cmd/net-sftp-forwarder-run
 
@@ -22,7 +23,11 @@ check:
 config:
 	sh install/config.sh
 
-install: build
+# install compiles like build but deliberately skips the gofmt gate:
+# it runs under sudo, where gofmt may not be on root's PATH.
+install:
+	mkdir -p build
+	$(GO) build -o build/net-sftp-forwarder-run ./cmd/net-sftp-forwarder-run
 	sh install/install.sh
 
 uninstall:
