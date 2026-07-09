@@ -15,6 +15,7 @@ import (
 	"io/fs"
 	"net"
 	"os"
+	"strings"
 
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/knownhosts"
@@ -79,12 +80,15 @@ func Callback(path string, policy Policy) (ssh.HostKeyCallback, error) {
 			return err // revoked key, unparsable file, ...: always fatal
 		}
 		if len(keyErr.Want) > 0 {
-			// The host presented a key that conflicts with what is pinned.
-			// Never accept this, under any policy. It is a re-keyed host, a
-			// man-in-the-middle — or a host whose other key types were never
-			// pinned and the negotiation picked one of those; seeding with
-			// plain `ssh-keyscan host` (all key types) avoids that case.
-			return fmt.Errorf("host key for %s conflicts with the one pinned in %s: %w", hostname, path, err)
+			// The host presented a key that matches none of the pinned ones.
+			// Never accept this, under any policy. The got/pinned pair below
+			// is what makes the cause diagnosable from the log alone: a
+			// re-keyed host or a man-in-the-middle changes the fingerprint of
+			// a pinned type, whereas a *different type* than any pinned means
+			// the negotiation picked a key that was never seeded — plain
+			// `ssh-keyscan host` (all key types) covers that case.
+			return fmt.Errorf("host key mismatch for %s in %s: got %s, pinned %s",
+				hostname, path, describeKey(key), describeKnownKeys(keyErr.Want))
 		}
 		if policy == AcceptNew {
 			return record(path, hostname, key)
@@ -122,6 +126,28 @@ func record(path, hostname string, key ssh.PublicKey) error {
 		return fmt.Errorf("recording host key for %s: %w", hostname, err)
 	}
 	return nil
+}
+
+// describeKey renders a public key as "<type> <sha256-fingerprint>", the
+// same fingerprint form ssh-keygen -l and OpenSSH's own logs print, so a
+// mismatch line can be compared against them without extra tooling.
+func describeKey(key ssh.PublicKey) string {
+	return key.Type() + " " + ssh.FingerprintSHA256(key)
+}
+
+// describeKnownKeys renders the pinned keys that a presented key failed to
+// match, so a mismatch line states plainly what was expected next to what
+// arrived. A differing type points at an unseeded key; a differing
+// fingerprint of the same type points at a re-keyed host or a forgery.
+func describeKnownKeys(want []knownhosts.KnownKey) string {
+	if len(want) == 0 {
+		return "(none)"
+	}
+	parts := make([]string, len(want))
+	for i, k := range want {
+		parts[i] = describeKey(k.Key)
+	}
+	return strings.Join(parts, ", ")
 }
 
 // keyscanHint renders the ssh-keyscan invocation that would seed an entry

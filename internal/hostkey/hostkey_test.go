@@ -140,19 +140,28 @@ func TestAcceptNewAppendsAfterMissingFinalNewline(t *testing.T) {
 
 func TestConflictFailsEvenUnderAcceptNew(t *testing.T) {
 	kh := filepath.Join(t.TempDir(), "known_hosts")
-	pinned := knownhosts.Line([]string{testHost}, genKey(t)) + "\n"
-	if err := os.WriteFile(kh, []byte(pinned), 0o600); err != nil {
+	pinnedKey := genKey(t)
+	if err := os.WriteFile(kh, []byte(knownhosts.Line([]string{testHost}, pinnedKey)+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	cb, err := Callback(kh, AcceptNew)
 	if err != nil {
 		t.Fatalf("Callback: %v", err)
 	}
-	err = cb(testHost, testAddr, genKey(t))
+	presented := genKey(t)
+	err = cb(testHost, testAddr, presented)
 	if err == nil {
 		t.Fatal("a conflicting key must fail even under AcceptNew")
 	}
-	if !strings.Contains(err.Error(), "conflicts") {
-		t.Errorf("error %q should name the conflict", err)
+	if !strings.Contains(err.Error(), "mismatch") {
+		t.Errorf("error %q should report a host key mismatch", err)
+	}
+	// The message must name both what arrived and what was pinned, by
+	// fingerprint, so the cause is diagnosable straight from the log.
+	if !strings.Contains(err.Error(), ssh.FingerprintSHA256(presented)) {
+		t.Errorf("error %q should include the presented key's fingerprint", err)
+	}
+	if !strings.Contains(err.Error(), ssh.FingerprintSHA256(pinnedKey)) {
+		t.Errorf("error %q should include the pinned key's fingerprint", err)
 	}
 }
