@@ -31,7 +31,10 @@ func (s *sink) Close() {
 	}
 }
 
-func (s *sink) Infof(format string, a ...any)    { s.emit((*syslog.Writer).Info, format, a...) }
+// Noticef logs at NOTICE, not INFO: a successful forward is a normal but
+// significant event that must survive the default BSD /var/log/messages
+// filter (*.notice and above), where an INFO line would be dropped.
+func (s *sink) Noticef(format string, a ...any)  { s.emit((*syslog.Writer).Notice, format, a...) }
 func (s *sink) Warningf(format string, a ...any) { s.emit((*syslog.Writer).Warning, format, a...) }
 func (s *sink) Errf(format string, a ...any)     { s.emit((*syslog.Writer).Err, format, a...) }
 

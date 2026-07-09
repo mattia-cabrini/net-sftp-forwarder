@@ -173,7 +173,7 @@ func runJob(log *sink, confPath, defaultKnownHosts string, policy hostkey.Policy
 			log.Errf("failed: %s -> %s (config=%s): removing local file after transfer: %v", e.Name(), job.Dest, name, err)
 			return
 		}
-		log.Infof("forwarded: %s -> %s:%s (config=%s, user=%s, group=%s)",
+		log.Noticef("forwarded: %s -> %s:%s (config=%s, user=%s, group=%s)",
 			e.Name(), job.Dest, job.RemoteDir, name, owner, group)
 	}
 }
