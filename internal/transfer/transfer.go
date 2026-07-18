@@ -63,15 +63,26 @@ type Session struct {
 	client *sftp.Client
 }
 
+// HostVerifier supplies host-key verification and the set of host-key
+// algorithms pinned for a host. Constraining the advertised algorithms to
+// the pinned types keeps the negotiation from settling on a key the verifier
+// cannot check — see internal/hostkey.
+type HostVerifier interface {
+	Callback() ssh.HostKeyCallback
+	Algorithms(addr string) []string
+}
+
 // Dial opens the SSH connection and the SFTP subsystem for a job.
-func Dial(user, host string, port int, signer ssh.Signer, hostKey ssh.HostKeyCallback) (*Session, error) {
+func Dial(user, host string, port int, signer ssh.Signer, hv HostVerifier) (*Session, error) {
+	addr := net.JoinHostPort(host, strconv.Itoa(port))
 	cfg := &ssh.ClientConfig{
-		User:            user,
-		Auth:            []ssh.AuthMethod{ssh.PublicKeys(signer)},
-		HostKeyCallback: hostKey,
-		Timeout:         dialTimeout,
+		User:              user,
+		Auth:              []ssh.AuthMethod{ssh.PublicKeys(signer)},
+		HostKeyCallback:   hv.Callback(),
+		HostKeyAlgorithms: hv.Algorithms(addr), // only the pinned types; nil = client default
+		Timeout:           dialTimeout,
 	}
-	conn, err := ssh.Dial("tcp", net.JoinHostPort(host, strconv.Itoa(port)), cfg)
+	conn, err := ssh.Dial("tcp", addr, cfg)
 	if err != nil {
 		return nil, err
 	}

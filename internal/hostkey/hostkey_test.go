@@ -4,11 +4,14 @@
 package hostkey
 
 import (
+	"crypto/ecdsa"
 	"crypto/ed25519"
+	"crypto/elliptic"
 	"crypto/rand"
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -27,6 +30,30 @@ func genKey(t *testing.T) ssh.PublicKey {
 		t.Fatal(err)
 	}
 	return sshPub
+}
+
+func genECDSAKey(t *testing.T) ssh.PublicKey {
+	t.Helper()
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pub, err := ssh.NewPublicKey(&priv.PublicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pub
+}
+
+// mkCallback builds a Checker and returns its policy callback, failing the
+// test if the file cannot be opened.
+func mkCallback(t *testing.T, path string, policy Policy) ssh.HostKeyCallback {
+	t.Helper()
+	c, err := New(path, policy)
+	if err != nil {
+		t.Fatalf("New(%s): %v", path, err)
+	}
+	return c.Callback()
 }
 
 // testAddr stands in for the peer address; the verifier prefers the dialed
@@ -59,11 +86,7 @@ func TestStrictRejectsUnknownHost(t *testing.T) {
 	if err := os.WriteFile(kh, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	cb, err := Callback(kh, Strict)
-	if err != nil {
-		t.Fatalf("Callback: %v", err)
-	}
-	err = cb(testHost, testAddr, genKey(t))
+	err := mkCallback(t, kh, Strict)(testHost, testAddr, genKey(t))
 	if err == nil {
 		t.Fatal("unknown host must fail closed under Strict")
 	}
@@ -74,7 +97,7 @@ func TestStrictRejectsUnknownHost(t *testing.T) {
 
 func TestStrictRejectsMissingFile(t *testing.T) {
 	kh := filepath.Join(t.TempDir(), "does_not_exist")
-	if _, err := Callback(kh, Strict); err == nil {
+	if _, err := New(kh, Strict); err == nil {
 		t.Fatal("missing known_hosts must be an error under Strict")
 	}
 	if _, err := os.Stat(kh); !os.IsNotExist(err) {
@@ -84,20 +107,13 @@ func TestStrictRejectsMissingFile(t *testing.T) {
 
 func TestAcceptNewPinsThenVerifies(t *testing.T) {
 	kh := filepath.Join(t.TempDir(), "known_hosts") // deliberately missing
-	cb, err := Callback(kh, AcceptNew)
-	if err != nil {
-		t.Fatalf("Callback: %v", err)
-	}
 	key := genKey(t)
-	if err := cb(testHost, testAddr, key); err != nil {
+	if err := mkCallback(t, kh, AcceptNew)(testHost, testAddr, key); err != nil {
 		t.Fatalf("first contact under AcceptNew must pin, got %v", err)
 	}
 
 	// A fresh Strict callback over the same file must now trust that key...
-	strict, err := Callback(kh, Strict)
-	if err != nil {
-		t.Fatalf("Callback over pinned file: %v", err)
-	}
+	strict := mkCallback(t, kh, Strict)
 	if err := strict(testHost, testAddr, key); err != nil {
 		t.Fatalf("pinned key did not verify: %v", err)
 	}
@@ -116,20 +132,13 @@ func TestAcceptNewAppendsAfterMissingFinalNewline(t *testing.T) {
 	if err := os.WriteFile(kh, []byte(pinned), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	cb, err := Callback(kh, AcceptNew)
-	if err != nil {
-		t.Fatalf("Callback: %v", err)
-	}
 	newKey := genKey(t)
-	if err := cb(testHost, testAddr, newKey); err != nil {
+	if err := mkCallback(t, kh, AcceptNew)(testHost, testAddr, newKey); err != nil {
 		t.Fatalf("pinning after a newline-less entry: %v", err)
 	}
 
 	// Both the pre-existing pin and the fresh one must verify afterwards.
-	strict, err := Callback(kh, Strict)
-	if err != nil {
-		t.Fatalf("Callback over appended file: %v", err)
-	}
+	strict := mkCallback(t, kh, Strict)
 	if err := strict("pinned.example:22", testAddr, oldKey); err != nil {
 		t.Errorf("pre-existing pin corrupted by the append: %v", err)
 	}
@@ -144,12 +153,8 @@ func TestConflictFailsEvenUnderAcceptNew(t *testing.T) {
 	if err := os.WriteFile(kh, []byte(knownhosts.Line([]string{testHost}, pinnedKey)+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	cb, err := Callback(kh, AcceptNew)
-	if err != nil {
-		t.Fatalf("Callback: %v", err)
-	}
 	presented := genKey(t)
-	err = cb(testHost, testAddr, presented)
+	err := mkCallback(t, kh, AcceptNew)(testHost, testAddr, presented)
 	if err == nil {
 		t.Fatal("a conflicting key must fail even under AcceptNew")
 	}
@@ -163,5 +168,46 @@ func TestConflictFailsEvenUnderAcceptNew(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), ssh.FingerprintSHA256(pinnedKey)) {
 		t.Errorf("error %q should include the pinned key's fingerprint", err)
+	}
+}
+
+// TestAlgorithmsAdvertiseOnlyPinnedTypes is the regression test for the
+// negotiation footgun: a host pinned with only ed25519 must make the client
+// advertise only ed25519, so the server cannot answer with (say) its ECDSA
+// key and be reported as a spurious mismatch.
+func TestAlgorithmsAdvertiseOnlyPinnedTypes(t *testing.T) {
+	kh := filepath.Join(t.TempDir(), "known_hosts")
+	if err := os.WriteFile(kh, []byte(knownhosts.Line([]string{testHost}, genKey(t))+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := New(kh, Strict)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	got := c.Algorithms(testHost)
+	if len(got) != 1 || got[0] != ssh.KeyAlgoED25519 {
+		t.Fatalf("Algorithms = %v, want exactly [%s]", got, ssh.KeyAlgoED25519)
+	}
+}
+
+func TestAlgorithmsCoverAllPinnedTypesAndSkipUnknown(t *testing.T) {
+	kh := filepath.Join(t.TempDir(), "known_hosts")
+	lines := knownhosts.Line([]string{testHost}, genKey(t)) + "\n" +
+		knownhosts.Line([]string{testHost}, genECDSAKey(t)) + "\n"
+	if err := os.WriteFile(kh, []byte(lines), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := New(kh, Strict)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	got := c.Algorithms(testHost)
+	if !slices.Contains(got, ssh.KeyAlgoED25519) || !slices.Contains(got, ssh.KeyAlgoECDSA256) {
+		t.Errorf("Algorithms = %v, want both ed25519 and ecdsa-nistp256", got)
+	}
+	// A host with no entry constrains nothing: nil lets the client use its
+	// default set, which accept-new needs to learn a first key.
+	if got := c.Algorithms("unseen.example:22"); got != nil {
+		t.Errorf("unknown host: Algorithms = %v, want nil", got)
 	}
 }

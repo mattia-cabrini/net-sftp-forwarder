@@ -146,12 +146,12 @@ func runJob(log *sink, confPath, defaultKnownHosts string, policy hostkey.Policy
 				log.Errf("config error: %s: %v", name, err)
 				return
 			}
-			verify, err := hostkey.Callback(job.KnownHosts, policy)
+			checker, err := hostkey.New(job.KnownHosts, policy)
 			if err != nil {
 				log.Errf("config error: %s: %v", name, err)
 				return
 			}
-			s, err := transfer.Dial(job.SSHUser, job.Host, job.Port, signer, verify)
+			s, err := transfer.Dial(job.SSHUser, job.Host, job.Port, signer, checker)
 			if err != nil {
 				log.Errf("failed: connect %s (config=%s): %v", job.Dest, name, err)
 				return

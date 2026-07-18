@@ -113,10 +113,11 @@ fail closed:
 sudo sh -c 'ssh-keyscan remote.example.org >> /usr/local/etc/net-sftp-forwarder/known_hosts'
 ```
 
-Scan without `-t` so every key type the host offers gets pinned: client and
-server negotiate a single host-key algorithm per connection, and a host
-pinned with only one type would look like a key conflict if the negotiation
-ever picks another.
+Pinning a single key type is enough: the forwarder tells the SSH client to
+offer only the host-key algorithms you have actually pinned, so the
+negotiation can never settle on a type the file cannot verify. (Seeding every
+type with a plain `ssh-keyscan` — no `-t` — is still fine, and lets the server
+pick its own preferred algorithm.)
 
 For first-run convenience you may relax this by running with
 `NET_SFTP_FORWARDER_STRICT=accept-new`, but pinning host keys ahead of time is the safer habit.

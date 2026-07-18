@@ -10,6 +10,8 @@
 package hostkey
 
 import (
+	"crypto/ed25519"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -46,11 +48,24 @@ func ParsePolicy(s string) (policy Policy, ok bool) {
 	return Strict, false
 }
 
-// Callback builds an ssh.HostKeyCallback that verifies hosts against the
-// known_hosts file at path under the given policy. The file format is
-// OpenSSH's own (hashed entries included), so files seeded by ssh-keyscan
-// or recorded by the OpenSSH client are read without translation.
-func Callback(path string, policy Policy) (ssh.HostKeyCallback, error) {
+// Checker verifies presented host keys against a known_hosts file under a
+// policy, and reports which key algorithms that file pins for a host. The
+// client is told to advertise only those algorithms, so the negotiation
+// cannot settle on a key type the file has no entry for — the footgun where a
+// host pinned with only ed25519 is handed the server's ECDSA key and
+// spuriously reported as a mismatch. The file format is OpenSSH's own (hashed
+// entries included), so files seeded by ssh-keyscan or recorded by the
+// OpenSSH client are read without translation.
+type Checker struct {
+	verify ssh.HostKeyCallback // raw knownhosts verifier
+	path   string
+	policy Policy
+}
+
+// New opens the known_hosts file at path and prepares a Checker under the
+// given policy. Under Strict a missing file is a fatal error; under AcceptNew
+// a missing file is created empty (0600 — it is trust data).
+func New(path string, policy Policy) (*Checker, error) {
 	if _, err := os.Stat(path); err != nil {
 		if !errors.Is(err, fs.ErrNotExist) {
 			return nil, fmt.Errorf("known_hosts %s: %w", path, err)
@@ -58,8 +73,8 @@ func Callback(path string, policy Policy) (ssh.HostKeyCallback, error) {
 		if policy != AcceptNew {
 			return nil, fmt.Errorf("known_hosts %s does not exist; create it and seed it with ssh-keyscan", path)
 		}
-		// accept-new may start from nothing: create the file (0600 — it is
-		// trust data) so the parser below has something to read.
+		// accept-new may start from nothing: create the file so the parser
+		// below has something to read.
 		if err := os.WriteFile(path, nil, 0o600); err != nil {
 			return nil, fmt.Errorf("creating known_hosts %s: %w", path, err)
 		}
@@ -69,9 +84,13 @@ func Callback(path string, policy Policy) (ssh.HostKeyCallback, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parsing known_hosts %s: %w", path, err)
 	}
+	return &Checker{verify: verify, path: path, policy: policy}, nil
+}
 
+// Callback returns the ssh.HostKeyCallback that enforces the policy.
+func (c *Checker) Callback() ssh.HostKeyCallback {
 	return func(hostname string, remote net.Addr, key ssh.PublicKey) error {
-		err := verify(hostname, remote, key)
+		err := c.verify(hostname, remote, key)
 		if err == nil {
 			return nil
 		}
@@ -82,21 +101,78 @@ func Callback(path string, policy Policy) (ssh.HostKeyCallback, error) {
 		if len(keyErr.Want) > 0 {
 			// The host presented a key that matches none of the pinned ones.
 			// Never accept this, under any policy. The got/pinned pair below
-			// is what makes the cause diagnosable from the log alone: a
-			// re-keyed host or a man-in-the-middle changes the fingerprint of
-			// a pinned type, whereas a *different type* than any pinned means
-			// the negotiation picked a key that was never seeded — plain
-			// `ssh-keyscan host` (all key types) covers that case.
+			// makes the cause diagnosable from the log: a re-keyed host or a
+			// man-in-the-middle changes the fingerprint of a pinned type.
+			// (The old "unpinned type was negotiated" cause is now prevented
+			// by Algorithms, so a mismatch here signals a genuinely wrong key.)
 			return fmt.Errorf("host key mismatch for %s in %s: got %s, pinned %s",
-				hostname, path, describeKey(key), describeKnownKeys(keyErr.Want))
+				hostname, c.path, describeKey(key), describeKnownKeys(keyErr.Want))
 		}
-		if policy == AcceptNew {
-			return record(path, hostname, key)
+		if c.policy == AcceptNew {
+			return record(c.path, hostname, key)
 		}
 		return fmt.Errorf("unknown host %s: no entry in %s (seed it: %s >> %s)",
-			hostname, path, keyscanHint(hostname), path)
-	}, nil
+			hostname, c.path, keyscanHint(hostname), c.path)
+	}
 }
+
+// Algorithms returns the host-key algorithms pinned for addr ("host:port"),
+// so the client advertises only types this file can verify. It returns nil
+// for an unknown host, leaving the client's default set in place — which
+// accept-new needs in order to learn (and then pin) the host's key.
+//
+// The pins are read straight from the knownhosts verifier: probing it with a
+// throwaway key yields a KeyError whose Want lists every key recorded for the
+// host, so this reuses the package's own matching (hashed entries included)
+// rather than re-parsing the file.
+func (c *Checker) Algorithms(addr string) []string {
+	pub, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		return nil
+	}
+	probe, err := ssh.NewPublicKey(pub)
+	if err != nil {
+		return nil
+	}
+	var keyErr *knownhosts.KeyError
+	if err := c.verify(addr, stringAddr(addr), probe); !errors.As(err, &keyErr) || len(keyErr.Want) == 0 {
+		return nil // unknown host, or no usable pins: do not constrain
+	}
+	return algorithmsFor(keyErr.Want)
+}
+
+// algorithmsFor maps the pinned keys to the host-key algorithm names to
+// advertise, de-duplicated. A pinned RSA key is offered with its SHA-2
+// signature variants first (legacy ssh-rsa last), so a server that has
+// retired SHA-1 still negotiates against the same key.
+func algorithmsFor(want []knownhosts.KnownKey) []string {
+	seen := map[string]bool{}
+	var algos []string
+	add := func(a string) {
+		if !seen[a] {
+			seen[a] = true
+			algos = append(algos, a)
+		}
+	}
+	for _, k := range want {
+		switch k.Key.Type() {
+		case ssh.KeyAlgoRSA:
+			add(ssh.KeyAlgoRSASHA256)
+			add(ssh.KeyAlgoRSASHA512)
+			add(ssh.KeyAlgoRSA)
+		default:
+			add(k.Key.Type())
+		}
+	}
+	return algos
+}
+
+// stringAddr is a net.Addr whose String() is a fixed "host:port", used only
+// to probe the knownhosts verifier, which reads remote.String().
+type stringAddr string
+
+func (stringAddr) Network() string  { return "tcp" }
+func (a stringAddr) String() string { return string(a) }
 
 // record appends hostname's key to the known_hosts file so that every later
 // run verifies against it. The forwarder's run lock guarantees a single
